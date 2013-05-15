@@ -15,48 +15,85 @@
  */
 
 var pimCalendar,
-    _event = require("../../lib/event"),
     _utils = require("../../lib/utils"),
     config = require("../../lib/config"),
     calendarUtils = require("./calendarUtils"),
     CalendarError = require("./CalendarError");
 
-function checkPermission(success, eventId) {
+function checkPermission(result) {
     if (!_utils.hasPermission(config, "access_pimdomain_calendars")) {
-        _event.trigger(eventId, {
-            "result": escape(JSON.stringify({
-                "_success": false,
-                "code": CalendarError.PERMISSION_DENIED_ERROR
-            }))
-        });
-        success();
+        result.callbackError(CalendarError.PERMISSION_DENIED_ERROR, false);
         return false;
     }
 
     return true;
 }
 
-function getCurrentTimezone(success, eventId) {
+function getCurrentTimezone(result) {
     var timezone = null;
 
     try {
         timezone = window.qnx.webplatform.device.timezone;
     } catch (e) {
-        _event.trigger(eventId, {
-            "result": escape(JSON.stringify({
-                "_success": false,
-                "code": CalendarError.UNKNOWN_ERROR
-            }))
-        });
-        success();
+        result.callbackError(CalendarError.UNKNOWN_ERROR, false);
     }
 
     return timezone;
 }
 
+function processJnextSaveOrRemoveData(result, JnextData) {
+    var data = JnextData;
+
+    if (data._success === true) {
+        result.callbackOk(data, false);
+    } else {
+        result.callbackError(data.code, false);
+    }
+}
+
+function processJnextFindData(eventId, eventHandler, JnextData) {
+    var data = JnextData,
+        i,
+        l,
+        more = false,
+        resultsObject = {},
+        birthdayInfo;
+
+    if (!data.events) {
+        data.events = []; // if JnextData.events return null, return an empty array
+    }
+
+    if (data._success === true) {
+        eventHandler.error = false;
+    }
+
+    // Concatenate results; do not add the same contacts
+    for (i = 0, l = eventHandler.searchResult.length; i < l; i++) {
+        resultsObject[eventHandler.searchResult[i].id] = true;
+    }
+
+    for (i = 0, l = data.events.length; i < l; i++) {
+        if (resultsObject[data.events[i].id]) {
+            // Already existing
+        } else {
+            eventHandler.searchResult.push(data.events[i]);
+        }
+    }
+
+    if (eventHandler.error) {
+        eventHandler.result.callbackError(data.code, false);
+    } else {
+        eventHandler.result.callbackOk({
+            "folders": data.folders,
+            "events": eventHandler.searchResult
+        }, false);
+    }
+}
+
 module.exports = {
-    find: function (success, fail, args) {
-        var parsedArgs = {},
+    find: function (success, fail, args, env) {
+        var result = new PluginResult(args, env),
+            parsedArgs = {},
             key;
 
         for (key in args) {
@@ -65,35 +102,29 @@ module.exports = {
             }
         }
 
-        if (!checkPermission(success, parsedArgs._eventId)) {
+        if (!checkPermission(result)) {
             return;
         }
 
         if (!calendarUtils.validateFindArguments(parsedArgs.options)) {
-            _event.trigger(parsedArgs._eventId, {
-                "result": escape(JSON.stringify({
-                    "_success": false,
-                    "code": CalendarError.INVALID_ARGUMENT_ERROR
-                }))
-            });
-            success();
+            result.callbackError(CalendarError.INVALID_ARGUMENT_ERROR, false);
             return;
         }
 
         parsedArgs.options = parsedArgs.options || {};
 
-        parsedArgs.options.sourceTimezone = getCurrentTimezone(parsedArgs._eventId, success);
+        parsedArgs.options.sourceTimezone = getCurrentTimezone(result);
         if (!parsedArgs.options.sourceTimezone) {
             return;
         }
 
-        pimCalendar.getInstance().find(parsedArgs);
-
-        success();
+        pimCalendar.getInstance().find(parsedArgs, result, processJnextFindData);
+        result.noResult(true);
     },
 
-    save: function (success, fail, args) {
-        var attributes = {},
+    save: function (success, fail, args, env) {
+        var result = new PluginResult(args, env),
+            attributes = {},
             key;
 
         for (key in args) {
@@ -102,11 +133,11 @@ module.exports = {
             }
         }
 
-        if (!checkPermission(success, attributes._eventId)) {
+        if (!checkPermission(result)) {
             return;
         }
 
-        attributes.sourceTimezone = getCurrentTimezone(attributes._eventId, success);
+        attributes.sourceTimezone = getCurrentTimezone(result);
         if (!attributes.sourceTimezone) {
             return;
         }
@@ -117,19 +148,21 @@ module.exports = {
             attributes.targetTimezone = "";
         }
 
-        pimCalendar.getInstance().save(attributes);
-        success();
+        attributes._eventId = result.callbackId;
+
+        pimCalendar.getInstance().save(attributes, result, processJnextSaveOrRemoveData);
+        result.noResult(true);
     },
 
-    remove: function (success, fail, args) {
-        var attributes = {
-            "accountId" : JSON.parse(decodeURIComponent(args.accountId)),
-            "calEventId" : JSON.parse(decodeURIComponent(args.calEventId)),
-            "_eventId" : JSON.parse(decodeURIComponent(args._eventId)),
-            "removeAll" : JSON.parse(decodeURIComponent(args.removeAll))
-        };
+    remove: function (success, fail, args, env) {
+        var result = new PluginResult(args, env),
+            attributes = {
+                "accountId" : JSON.parse(decodeURIComponent(args.accountId)),
+                "calEventId" : JSON.parse(decodeURIComponent(args.calEventId)),
+                "removeAll" : JSON.parse(decodeURIComponent(args.removeAll))
+            };
 
-        if (!checkPermission(success, attributes._eventId)) {
+        if (!checkPermission(result)) {
             return;
         }
 
@@ -142,37 +175,44 @@ module.exports = {
             return;
         }
 
-        pimCalendar.getInstance().remove(attributes);
-        success();
+        attributes._eventId = result.callbackId;
+
+        pimCalendar.getInstance().remove(attributes, result, processJnextSaveOrRemoveData);
+        result.noResult(true);
     },
 
-    getDefaultCalendarAccount: function (success, fail, args) {
+    getDefaultCalendarAccount: function (success, fail, args, env) {
+        var result = new PluginResult(args, env);
+
         if (!_utils.hasPermission(config, "access_pimdomain_calendars")) {
-            success(null);
+            result.error(CalendarError.PERMISSION_DENIED_ERROR, false);
             return;
         }
 
-        success(pimCalendar.getInstance().getDefaultCalendarAccount());
+        result.ok(pimCalendar.getInstance().getDefaultCalendarAccount(), false);
     },
 
-    getCalendarAccounts: function (success, fail, args) {
+    getCalendarAccounts: function (success, fail, args, env) {
+        var result = new PluginResult(args, env);
+
         if (!_utils.hasPermission(config, "access_pimdomain_calendars")) {
-            success(null);
+            result.error(CalendarError.PERMISSION_DENIED_ERROR, false);
             return;
         }
 
-        success(pimCalendar.getInstance().getCalendarAccounts());
+        result.ok(pimCalendar.getInstance().getCalendarAccounts(), false);
     },
 
-    getEvent: function (success, fail, args) {
-        if (!_utils.hasPermission(config, "access_pimdomain_calendars")) {
-            success(null);
-            return;
-        }
-
-        var findOptions = {},
+    getEvent: function (success, fail, args, env) {
+        var pluginResult = new PluginResult(args, env),
+            findOptions = {},
             results,
             event = null;
+
+        if (!_utils.hasPermission(config, "access_pimdomain_calendars")) {
+            pluginResult.error(CalendarError.PERMISSION_DENIED_ERROR, false);
+            return;
+        }
 
         findOptions.eventId = JSON.parse(decodeURIComponent(args.eventId));
         findOptions.accountId = JSON.parse(decodeURIComponent(args.accountId));
@@ -185,25 +225,33 @@ module.exports = {
             }
         }
 
-        success(event);
+        if (event) {
+            pluginResult.ok(event, false);
+        } else {
+            pluginResult.error(CalendarError.UNKNOWN_ERROR, false);
+        }
     },
 
-    getCalendarFolders: function (success, fail, args) {
+    getCalendarFolders: function (success, fail, args, env) {
+        var result = new PluginResult(args, env);
+
         if (!_utils.hasPermission(config, "access_pimdomain_calendars")) {
-            success(null);
+            result.error(CalendarError.PERMISSION_DENIED_ERROR, false);
             return;
         }
 
-        success(pimCalendar.getInstance().getCalendarFolders());
+        result.ok(pimCalendar.getInstance().getCalendarFolders(), false);
     },
 
-    getDefaultCalendarFolder: function (success, fail, args) {
+    getDefaultCalendarFolder: function (success, fail, args, env) {
+        var result = new PluginResult(args, env);
+
         if (!_utils.hasPermission(config, "access_pimdomain_calendars")) {
-            success(null);
+            result.error(CalendarError.PERMISSION_DENIED_ERROR, false);
             return;
         }
 
-        success(pimCalendar.getInstance().getDefaultCalendarFolder());
+        result.ok(pimCalendar.getInstance().getDefaultCalendarFolder(), false);
     }
 };
 
@@ -216,7 +264,17 @@ JNEXT.PimCalendar = function ()
     var self = this,
         hasInstance = false;
 
-    self.find = function (args) {
+    self.find = function (args, pluginResult, handler) {
+        self.eventHandlers[args.callbackId] = {
+            "result" : pluginResult,
+            "action" : "find",
+            "searchResult" : [],
+            "handler" : handler,
+            "error" : true
+        };
+
+        args._eventId = args.callbackId;
+
         JNEXT.invoke(self.m_id, "find " + JSON.stringify(args));
         return "";
     };
@@ -226,12 +284,24 @@ JNEXT.PimCalendar = function ()
         return JSON.parse(value);
     };
 
-    self.save = function (args) {
+    self.save = function (args, pluginResult, handler) {
+        //register save eventHandler for when JNEXT onEvent fires
+        self.eventHandlers[args._eventId] = {
+            "result" : pluginResult,
+            "action" : "save",
+            "handler" : handler
+        };
         JNEXT.invoke(self.m_id, "save " + JSON.stringify(args));
         return "";
     };
 
-    self.remove = function (args) {
+    self.remove = function (args, pluginResult, handler) {
+        //register remove eventHandler for when JNEXT onEvent fires
+        self.eventHandlers[args._eventId] = {
+            "result" : pluginResult,
+            "action" : "remove",
+            "handler" : handler
+        };
         JNEXT.invoke(self.m_id, "remove " + JSON.stringify(args));
         return "";
     };
@@ -277,15 +347,23 @@ JNEXT.PimCalendar = function ()
     self.onEvent = function (strData) {
         var arData = strData.split(" "),
             strEventDesc = arData[0],
-            args = {};
+            args = {},
+            eventHandler;
 
         if (strEventDesc === "result") {
             args.result = escape(strData.split(" ").slice(2).join(" "));
-            _event.trigger(arData[1], args);
+            eventHandler = self.eventHandlers[arData[1]];
+
+            if (eventHandler.action === "save" || eventHandler.action === "remove") {
+                eventHandler.handler(eventHandler.result, JSON.parse(decodeURIComponent(args.result)));
+            } else if (eventHandler.action === "find") {
+                eventHandler.handler(arData[1], eventHandler, JSON.parse(decodeURIComponent(args.result)));
+            }
         }
     };
 
     self.m_id = "";
+    self.eventHandlers = {};
 
     self.getInstance = function () {
         if (!hasInstance) {
